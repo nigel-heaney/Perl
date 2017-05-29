@@ -1,0 +1,133 @@
+#!/usr/bin/perl
+# check_jmx - A tool to pull heap information using the jmap tool.
+#
+# Author: Nigel Heaney
+# 
+# Version Info:
+# 0.1 - Initial build
+#
+#Globals
+
+my $version = "v0.1";
+my $debug=0;		# Set debugging on/off (enable logging, etc)
+
+my $process_id = "";
+######################################################################
+# MAIN
+if ($#ARGV == 4) {
+    #scan java instance for relevant process
+    $process_id = jps_scan($ARGV[0], $ARGV[1]);
+    #found process...lets probe the details...
+    jmap_capture($process_id,$ARGV[1],$ARGV[2], $ARGV[3], $ARGV[4]); 
+    exit(3);
+}
+show_help(); exit(2);
+
+
+######################################################################
+
+# Show command usage
+sub show_help {
+print <<TEXT;
+check_jmx2 $version - collate heap stats
+------------------------------------
+
+Usage: check_jmx <fkident> <search_pattern> <%Warn> <%Crit> <n * 1 minute cycles>
+
+  <fkident>  		The ident for the environment
+  <search_pattern>	This is the string value to isolate which process(es) to be monitored
+  <%Warn>		Set the warning threshold in %	
+  <%Crit>		Set the critical threshold in %	
+  <N>			Set the number of tests tp be run N * 1 minute	
+
+  -h | --help           Show this help
+
+  e.g. Check for webapp1 that is running on abcprod and check every minute for 5 minutes.
+       check_jmx envname webapp1 80 90 5
+TEXT
+
+}
+
+sub jps_scan{
+	#jps_scan(<fkident> <search> )
+	my ($fkident, $search) = @_;
+	my $output = `jps -v | grep $search | grep $fkident`;
+   	my ($process_id, $junk) = split / /,$output; 
+	if ($process_id == "") {
+		print "UNKNOWN - No $search Processes Found for $fkident\n ";
+		exit(3);
+	} 
+	return ($process_id);
+}
+
+sub jmap_capture{
+	#jps_scan(<process_id> %warn %crit num)
+	my ($process_id,$search,$warn, $crit, $num) = @_;
+	my $maxheapsize, $edenspace, $psold;
+	my $type, $utilisation, $i, $total_util, $av_util;
+	# We will test every 15 seconds so number of cycles ($num) will be multiple by 4 (4 * 15 seconds= 1 minute)
+	$num *= 4;
+	#parse jps output
+	for($i = 1; $i < $num+1; $i++){
+		open(jmap, "jmap -J-d64 -heap $process_id 2>&1|");
+		#open(jmap, "cat /scripts/jps_output.txt |");
+		$maxheapsize = -1;
+		$edenspace = -1;
+		$psold = -1;
+		while (<jmap>){
+			print "DEBUG: $_" if $debug;
+			next if $_ =~ /^$/;
+
+			if ($_=~ "MaxHeapSize") {
+				$maxheapsize = $_;
+				$maxheapsize =~ s/^.*= ([0-9]+).*/\1/g;
+			}
+        	$type = "Eden Space" if ($_ =~ "Eden Space");
+	        $type = "PS Old Generation"  if ($_ =~ "PS Old Generation");
+	        $type = "ignore" if ($_ =~ "PS Perm Generation");
+	        $type = "ignore" if ($_ =~ "To Space");
+	        $type = "ignore" if ($_ =~ "From Space");
+
+	       	if ($_ =~ "used.*=") {
+			if ($type =~ "Eden Space"){
+				$edenspace = $_;
+				$edenspace =~ s/^.*= ([0-9]+).*/\1/g;
+			}
+		        if ($type =~ "PS Old Generation"){
+		            $psold = $_;
+		            $psold =~ s/^.*= ([0-9]+).*/\1/g;
+	   			}
+       		}
+		} 	#completed processing stats
+		close(jmap);
+		# add to total and calc average later	
+		$utilisation += (100 /  $maxheapsize) * ($psold + $edenspace);
+		if ($debug){
+			print "DEBUG: MaxHeapSize=$maxheapsize";
+			print "DEBUG: PSOld=$psold";
+			print "DEBUG: EDEN=$edenspace";
+			print "DEBUG: UTILISATION=" . ($utilisation / $i) . "\n";
+			print "DEBUG: Cycle: $i of $num...\n"; 
+			print "DEBUG: ". localtime() . "\n";
+		}
+		#trap for errors in the parse and we have missed a value...
+		if (($maxheapsize == -1) || ($edenspace == -1) || ($psold == -1)) {
+	        print "UNKNOWN - Key values missing $search\n";
+    	    exit(3);
+		}
+		sleep 15 if ($i < $num);
+	}
+	# Calculate averages..
+	$av_util = $utilisation / $num;
+    if ($av_util >= $crit) {
+		printf "CRITICAL - %s memory usage is %3.1f percent\n",$search,$av_util;
+		exit(2);	
+    }
+	if ($av_util >= $warn) {
+		printf "WARNING - %s memory usage is %3.1f percent\n",$search,$av_util;
+		exit(1);	
+	}
+	printf "OK - %s memory usage is %3.1f percent\n",$search,$av_util;
+	exit(0);	
+}
+

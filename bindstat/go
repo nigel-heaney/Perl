@@ -1,0 +1,5 @@
+#!/bin/bash
+cp /cygdrive/d/programs/bindstat/named.stats.template /tmp/named.stats
+x=`perl -e "print time"`
+sed -i "s/_TIME_/$x/g" /tmp/named.stats
+sed -i "s/10/$1/g" /tmp/named.stats
